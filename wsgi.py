@@ -1,12 +1,7 @@
-"""PythonAnywhere WSGI reference file.
-
-On PythonAnywhere, the actual WSGI config is edited via the Web tab,
-not this file. This file exists so the path and import are documented
-in the repo.
-"""
+"""PythonAnywhere WSGI reference file. Path: dewclaw-flask."""
 import sys
 
-path = "/home/YOUR_USERNAME/dewclaw"
+path = "/home/YOUR_USERNAME/dewclaw-flask"
 if path not in sys.path:
     sys.path.insert(0, path)
 
