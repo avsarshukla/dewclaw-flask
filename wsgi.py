@@ -1,7 +1,7 @@
 """PythonAnywhere WSGI reference file. Path: dewclaw-flask."""
 import sys
 
-path = "/home/YOUR_USERNAME/dewclaw-flask"
+path = "/home/avsar/dewclaw-flask"
 if path not in sys.path:
     sys.path.insert(0, path)
 
