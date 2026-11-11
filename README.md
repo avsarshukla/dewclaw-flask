@@ -1,3 +1,158 @@
+
+Project Report
+
+## Project Overview
+Dewclaw is a lightweight, full-stack web application designed to connect animal shelters with potential adopters. Unlike complex, bloated platforms that require heavy infrastructure, Dewclaw focuses on a streamlined, single-shelter workflow. It provides a clear pipeline for dogs—from intake and listing to reservation and adoption—while maintaining a transparent history of every dog's journey. 
+
+The project is deployed as a live MVP using a free-tier cloud architecture.
+
+## 1. Core Features
+
+The platform operates on a two-role model: **Adopter** and **Shelter Admin**. Every feature below is implemented and functional in the deployed MVP.
+
+### 1.1 Authentication and Roles
+
+- Session-based login using Flask-Login with hashed passwords (Werkzeug `generate_password_hash` / `check_password_hash`).
+- Two roles enforced at the route level: `adopter` and `shelter_admin`.
+- Adopter self-registration; admin account seeded on first boot.
+- Decorator-based access control (`@admin_required`) prevents non-admin access to shelter routes.
+
+### 1.2 Dog Management (Shelter Admin)
+
+- Create, edit, and archive dog profiles with: name, breed, age, sex, temperament, health flags, description, and photo.
+- Photo upload handled via `werkzeug.utils.secure_filename`, stored under `static/uploads/`.
+- Status transitions: `available` → `reserved` → `adopted`.
+- No hard delete — records persist for historical continuity.
+
+### 1.3 Adoption Applications
+
+- Adopters browse available dogs, view detail pages, and submit an application with a message.
+- One application per (dog, adopter) pair, enforced by a database `UNIQUE` constraint rather than application logic.
+- Adopters track application status (`pending`, `rejected`) from a personal dashboard.
+- Shelter admin reviews pending applications and rejects with a written reason, which the adopter sees.
+
+### 1.4 Reservation with Automatic Expiry
+
+- Admin reserves a dog for 14 days; the dog locks for other applicants.
+- Expiry is evaluated lazily on read — no background job required (see §3.1).
+- Admin can unreserve or convert a reservation to adoption at any time.
+
+### 1.5 Activity Timeline
+
+- Every state change writes an immutable row to an `activity` table: added to shelter, application submitted, reserved until [date], reservation cancelled, adopted.
+- Timeline is publicly visible on each dog's detail page, providing transparency for adopters and an audit trail for the shelter.
+
+### 1.6 Shelter Dashboard
+
+- Single view consolidating: pending applications, active reservations, and all dogs with status and available actions.
+- Actions available inline: reject application with reason, reserve, unreserve, adopt, edit.
+
+---
+
+## 2. Tech Stack and Delivery
+
+The architecture was intentionally constrained to a **single-file Flask monolith with zero external services**. Every layer was chosen to minimise moving parts, not to demonstrate breadth.
+
+| Layer | Technology | Rationale |
+|---|---|---|
+| **Application** | Flask 3.0.3 | Minimal, unopinionated framework; one file can hold the entire app |
+| **Database** | SQLite (stdlib `sqlite3`) | File-based, serverless, zero configuration; persists on PythonAnywhere's disk |
+| **Templating** | Jinja2 via `DictLoader` | Templates registered as strings in `app.py`; no `templates/` directory |
+| **Authentication** | Flask-Login + Werkzeug | Session cookies instead of JWT; no client-side token storage |
+| **Password Hashing** | Werkzeug `generate_password_hash` | Ships with Flask; no extra dependency |
+| **File Uploads** | `werkzeug.utils.secure_filename` | Built into Flask's dependency tree; no `multer` equivalent needed |
+| **Hosting** | PythonAnywhere (free tier) | Persistent SQLite; no ephemeral-storage workaround required |
+| **Version Control** | Git + GitHub (public repo) | Deployment pull source; `git pull` + Reload is the entire redeploy loop |
+
+**Deliberate exclusions.** No Docker. No Redis. No Celery. No background job queue. No separate frontend. No CORS. No JWT. No ORM. No migration framework. No CDN dependency for styling. No external database server.
+
+**Resulting footprint.** Three tracked files (`app.py`, `requirements.txt`, `wsgi.py`), one static directory, one SQLite file created at runtime, three pinned dependencies.
+
+---
+
+## 3. Key Technical Innovations (Simplified Architecture)
+
+Two design decisions replace conventional infrastructure with mechanisms internal to the application, and a third eliminates structural overhead. Each addresses a specific scaling or operational concern without introducing a new component.
+
+### 3.1 Lazy Reservation Expiry — No Background Scheduler
+
+**Conventional approach.** A cron job or task queue (Celery, RQ, APScheduler) periodically scans reservations and flips expired ones back to available.
+
+**Dewclaw approach.** No scheduler exists. The function `effective_dog()` is invoked on every read of a dog record. It checks whether `status = 'reserved'` and `reserved_until < now()`; if so, it returns a view of the record with `status = 'available'` and `reserved_until = None`. No write-back occurs. The stale timestamp remains in the database until the next reservation overwrites it.
+
+**Consequence.**
+- Zero background workers, zero cron configuration, zero queue infrastructure.
+- Correctness is guaranteed by evaluation time, not by scheduler reliability.
+- The approach is only viable because the system is **read-mostly** and expiry is **idempotent** — a property that holds for a single-shelter workflow.
+
+### 3.2 Activity Logging Without Event Sourcing
+
+**Conventional approach.** Full event sourcing with an event store, projections, and read-model rebuilds.
+
+**Dewclaw approach.** A single `activity` table with columns `(id, dog_id, event_type, message, created_at)`. Each state-changing action inserts one row inside the same transaction as the state change itself. The detail page renders rows in reverse chronological order.
+
+**Consequence.**
+- Transparent, human-readable history for adopters, in approximately five lines of insertion code per action.
+- Full audit trail for the shelter, without projections or replay infrastructure.
+- Sufficient for the stated requirement (verifiable history); insufficient for temporal queries, which the spec does not require.
+
+### 3.3 Single-File Application via `DictLoader`
+
+**Conventional approach.** Flask projects use `templates/` directories, blueprints, and separate `models.py` / `forms.py` / `views.py` modules.
+
+**Dewclaw approach.** All Jinja templates are defined as module-level strings in `app.py` and registered with `jinja2.DictLoader`. All routes live in one file. `{% extends 'base' %}` resolves through the loader, so template inheritance survives without a filesystem.
+
+**Consequence.**
+- The entire application is one reviewable, deployable file.
+- Zero import graph, zero circular dependency risk, zero directory-navigation overhead for a project of this scope.
+- Trade-off accepted: no editor syntax highlighting inside templates, and the file is not suitable for team parallel development.
+
+### 3.4 Database-Enforced Invariants
+
+Business rules that are conventionally enforced in application code are instead enforced by schema constraints:
+
+| Rule | Enforced by |
+|---|---|
+| One application per (dog, adopter) | `UNIQUE(dog_id, adopter_id)` on `applications` |
+| Valid status values only | `CHECK(status IN (...))` on `dogs.status` and `applications.status` |
+| No orphaned activity | `FOREIGN KEY (dog_id) REFERENCES dogs(id)` with `PRAGMA foreign_keys = ON` |
+
+This means a bug in a route handler cannot violate the rule — the insert fails at the database.
+
+---
+
+## 4. Innovativeness
+
+### 4.1 The Traditional Adoption Workflow
+
+Current practice at small shelters and rescues:
+
+| Stage | Tool used | Consequence |
+|---|---|---|
+| Discovery | Instagram posts, Facebook groups, WhatsApp forwards | Listing disappears from feed within hours; no searchable catalogue |
+| Inquiry | WhatsApp DM or Instagram comment | No record; multiple volunteers may respond to the same person |
+| Application | Free-text message | No structured data, no comparison across applicants |
+| Coordination | WhatsApp group chat | Multiple adopters told "yes" for the same dog; race condition resolved manually and often too late |
+| Handover | Verbal | No record of which adopter received which dog |
+| Post-adoption | None | Dog's history after adoption is permanently lost |
+
+**Fundamental limitation.** Social media provides *reach* but no *state*. WhatsApp provides *conversation* but no *record*. Neither provides a persistent, queryable object representing the dog, and neither enforces any invariant — the "two adopters told yes" failure is not an edge case, it is the expected outcome of the medium.
+
+### 4.2 What Dewclaw Provides Instead
+
+Dewclaw replaces **discovery + coordination** with an **end-to-end transactional pipeline** in which the dog record is the primary entity and every state change is persisted.
+
+| Capability | Traditional workflow | Dewclaw |
+|---|---|---|
+| Searchable catalogue | Ephemeral social feed | Persistent, filterable listings |
+| Application structure | Free-text DM | Structured application linked to dog and adopter |
+| Double-adoption race | Resolved manually, often incorrectly | Prevented by database constraint and 14-day hold |
+| Reservation expiry | Tracked mentally | Evaluated on read; no manual check required |
+| Rejection feedback | Adopter ignored or ghosted | Written reason surfaced to adopter |
+| Dog history | Lost after handover | Append-only timeline, publicly visible |
+| Record deletion | Post removed, history gone | No delete path; records persist by design |
+| Audit trail | None | Every state change logged with timestamp |
+
 # Installation and Local Execution 
 
 ## Prerequisites
